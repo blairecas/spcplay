@@ -1,0 +1,733 @@
+; SPC+INS music player (c) Manwe/SandS 1995-2023
+; Works on any BK 0010, BK 0011 with FDD, BK 0011M with FDD or HDD
+; To compile this source use PDPy11 by Ivanq: github.com/pdpy11
+; Get more software on manwe.pdp-11.ru
+
+		EMT36		= 320		; pointer to file data
+		Address		= EMT36+2	; address to load a file
+		Size		= EMT36+30	; the size of loaded file
+		MemReg		= 177130	; for A16 and SMK controllers
+		COVOX		= 177714	; port address
+		SysReg		= 177716	; system register (keyboard, memory pages)
+		Page4		= 16000		; DOS memory page
+		Low			= 420		; where to move player
+		Play10Size	= EndPlayer10-Player10
+		Data10		= Low+Play10Size	; were to store patterns and instruments
+		Play11Size	= EndPlayer11-Player11
+		Data11		= Low+Play11Size	; were to store patterns and instruments
+
+		p0			= 0b1110	; memory page 0
+		p1			= 0b1000
+		p2			= 0b1010
+		p3			= 0b1011
+		DOS			= 0b1100	; DOS page
+		Scr1		= 0b1001
+		Scr2		= 0b1111
+		p7			= 0b1101	; system page
+		Hi			= 400
+		Lo			= 10000
+
+
+		CALL Monitor11		; BK 0011 or BK 0011M tape loader?
+		CALL LoadSPC		; load SPC file and refresh disk catalog in memory
+
+SystemDetect:
+		MOV @#120014,R0			; pointer to current disk catalog
+		CMP 402(R0),#51414		; MKDOS marker
+		BNE 1
+		MOV @#120004,R0			; check MKDOS version
+		SUB #100473,R0			; 100000+315.
+		BMI 1
+			TST @#120116		; non MKDOS disk?
+			BNE 1
+			INC MKDOS			; set sign: version is higher than 3.15
+			CALL @120016		; MKDOS init disk driver
+			MOV R3,FDDblk		; save address of HDD parameters block
+1:		CMPB @#SysReg+1,#200	; is it BK 0010 or BK 0011?
+		BEQ BK0010				; skip if BK-0010
+
+
+BK0011:	MOV #Data11,INSadr
+
+		MOV #Data11,R0		; INS loading address
+		MOV R0,INSadr
+		MOV #137700,R2		; FDD parameters address (140000-100)
+		MOV R2,SPCend
+		SUB @#Size,R2		; subtract SPC file size
+		MOV R2,SPCnew
+		MOV R2,SPC11		; init Player 11
+		SUB #600,R2			; half size of Limiter table
+		MOV R2,Lim+2
+		SUB #600,R2			; half size of Limiter table
+		TST MKDOS
+		BPL 2
+			MOV #100000,R2
+2:		MOV R2,INSend		; memory map: INS, Limiter table, SPC, FDD block
+		MOV R2,INSize
+		SUB R0,INSize
+
+		CALL Check			; fix patterns and set Tempo variable
+		MOV Tempo,Temp11	; init Player 11
+
+		MOV #Scr1*Lo+p3*Hi,@#SysReg
+		MOV SPCnew,R2
+		MOV SPC,R1			; move fixed SPC to page 3
+		MOV @#Size,R0
+		CLC
+		ROR R0
+3:			MOV (R1)+,(R2)+
+		SOB R0,3
+
+		CALL BuildLimiterTable
+
+		MOV #Scr1*Lo+DOS*Hi,@#SysReg	; for EMT 20
+		CALL Title
+
+		TST MKDOS
+		BPL MKDOS11
+
+DOS11:	MOV #Player11,R4	; pointer to player code for BK 0011
+		CALL CopyPlayer		; copy to low address
+		MOV #EMT36,R1		; EMT 36 loader if not MKDOS
+		JMP @#Low
+
+MKDOS11:
+		CALL GetINSinfo		; find INS file in MKDOS catalog
+
+		MOV #DOS*Lo+p3*Hi,@#SysReg	; to copy from DOS page to page 3
+		MOV FDDblk,R2
+		SUB #40000,R2		; DOS page is at 40000 now
+		MOV #137700,R3
+		MOV #40,R0
+1:		MOV (R2)+,(R3)+		; copy HDD parameters block
+		SOB R0,1
+		MOV #p1*Lo+p3*Hi,@#SysReg	; page 3 for Limiter table
+
+		MOV #Player11,R5	; replace EMT 36 by blocks loader
+		MOV #BlockLoad11,R4
+		MOV #12.,R2 		; replace 12. words
+2:		MOV (R4)+,(R5)+		; copy code
+		SOB R2,2
+
+		MOV INSadr,Addr11	; init player
+		MOV INSize,Size11
+		MOV #Player11,R4	; pointer to player code for BK 0011
+		CALL CopyPlayer		; copy to low address
+
+		MOV FirstBlock,R0
+		MOV INSize,R1
+		CLC
+		ROR R1
+		MOV INSadr,R2
+		MOV #137700,R3		; new HDD parameters block
+		JMP @#Low
+
+
+BK0010:	MOV #Data10,INSadr
+		CALL CheckMem10		; set SPCnew, SPCend, SPC10, FDDb10
+
+		MOV #Data10,R0		; minimal loading address
+		TST SPCnew			; high memory?
+		BMI 1
+			MOV R0,SPCnew
+			MOV R0,SPC10
+			ADD @#Size,R0	; size of SPC file
+			MOV R0,Addr10	; INS address
+1:		MOV R0,@#Address	; set address to load INS file
+
+		CALL Check
+		MOV Tempo,Temp10	; init Player 10
+
+		CALL Title
+
+		TST MKDOS
+		BPL MKDOS10			; skip if standard EMT 36 loader
+
+DOS10:	MOV #Player10,R4	; pointer to player code for BK 0010
+		CALL CopyPlayer		; copy to low address
+		MOV @#Size,R5		; size of modified SPC file
+		MOV SPCnew,R4		; where to copy modyfied SPC file
+		MOV SPC,R3			; pointer to modyfied SPC file
+		MOV #EMT36,R1		; EMT 36 loader if not MKDOS
+		MOV INSadr,@Address
+		JMP @#Low
+
+MKDOS10:
+		; memory map: INS (Data10..1000000), SPC, FDD block
+
+		CALL GetINSinfo		; find INS file in MKDOS catalog
+
+		MOV FDDblk,R2
+		MOV FDDb10,R3		; init loader
+		MOV #40,R0
+1:		MOV (R2)+,(R3)+		; copy HDD parameters block
+		SOB R0,1
+
+		MOV INSadr,Addr10	; init player
+		MOV INSize,Size10
+
+		MOV #Player10,R5
+		MOV #BlockLoad10,R4	; replace EMT 36 by blocks loader
+		MOV #15.,R2 		; replace 15. words
+2:		MOV (R4)+,(R5)+		; copy code
+		SOB R2,2
+
+		MOV #Player10,R4
+		CALL CopyPlayer		; copy player to low memory
+
+		MOV @#Size,R5		; size of modified SPC file
+		MOV SPCnew,R4		; where to copy modyfied SPC file
+		MOV SPC,R3			; pointer to modyfied SPC file
+		MOV INSadr,R2		; where to load
+		MOV INSize,R1		; how many bytes to load
+		CLC
+		ROR R1				; how many words to load
+		MOV FirstBlock,R0	; INS file on disk
+
+		JMP @#Low			; start player at low memory
+
+; ------------------
+
+		; 15. words
+BlockLoad10:				; code to replace EMT 36 loader
+1:		MOVB (R3)+,(R4)+	; copy modyfied SPC file
+		SOB R5,1
+		MOV (PC)+,R3
+FDDb10:	.WORD 136712		; block of parameters for FDD/HDD driver
+		MOV PC,SP
+		CALL @#160004		; load file by block number
+		TST @#52			; no loading errors?
+		BEQ 2
+			JMP @#100000	; restart computer on error
+2:		CLR R5
+		MOV (PC)+,R4		; INS size
+Size10:	.WORD 100000-Data10
+
+
+		; player code will be moved to low memory address
+
+Player10:
+		; loader code, 15. words, can be replaced with another subroutine
+1:		MOVB (R3)+,(R4)+	; copy modyfied SPC file
+		SOB R5,1
+		MOV PC,SP
+		EMT 36				; load INS file
+		TSTB @#EMT36+1		; no loading errors?
+		BEQ 2
+		CMPB @#EMT36+1,#4	; ROM overlap or Stop pressed
+		BNE Exit10			; restart computer on error
+			COM R5			; out of memory sign
+2:		MOV @#Size,R4
+		NOP
+		; end of loader
+
+		MOV (PC)+,R3		; INS address
+Addr10:	.WORD Data10
+
+		MTPS #340			; disable interruptions
+		TST R5
+		BEQ 2
+			MOV #100000,R4
+			SUB R3,R4		; reduce size
+			CLR R5
+
+		; build volume /3 table
+
+2:		MOV #125,R1			; build table /3
+		MOV R1,R2
+		MOVB R1,(R5)+		; R0 pointer to Div3 table
+3:			INC R1
+			MOVB R1,(R5)+
+			MOVB R1,(R5)+
+			MOVB R1,(R5)+
+		SOB R2,3
+
+		; recalculate volume /3
+
+		MOV #177400,R2
+		MOV #100000,R5		; highest available address
+		SUB R3,R5
+		SUB R4,R5
+		BPL 4				; no ROM overlap?
+		ADD R5,R4			; fix loop size
+4:			MOVB (R3),R0
+			BIC R2,R0
+			MOVB (R0),(R3)+	; Div3(R3)
+		SOB R4,4
+
+		CLR (R4)+			; CLR @#0 to use as end marker
+		MOV #200,(R4)+		; zero volume
+		MOV #100000,(R4)+	; @#4
+		MOV #340,(R4)
+
+		MOV #COVOX,SP		; use Stack Pointer as pointer to Covox port
+		MOV SPC10,R1		; pointer to SPC file
+		BR Next10
+
+		; 11364 Hz mixing rate on BK 0010 3 MHz
+
+Play10:	MOV (PC)+,R0
+Temp10:	.WORD 3000			; less is faster
+
+Row10:	ADD (PC)+,(PC)+
+Ch101:	.WORD 1,1			; frequency for channel 1
+		ADC R3				; pointer to sample for channel 1
+		ADD (PC)+,(PC)+
+Ch102:	.WORD 1,1			; frequency for channel 2
+		ADC R4				; pointer to sample for channel 2
+Ch103:	MOVB (R5)+,R1		; instruction for channel 3
+		MOVB (R4),R2		; read sample data
+		ADD R2,R1			; mix sounds
+		MOVB (R3),R2		; read sample data
+		ADD R2,R1			; mix sounds
+		MOVB R1,(SP)		; send mixed sound to Covox
+		SOB R0,Row10
+
+; Sample address	word	| Channel 1 data
+; Note frequency	word	|
+; Sample address	word	| Channel 2 data
+; Note frequency	word	|
+; Drum address		word	| Channel 3 data
+; Drum instruction	word
+
+		MOV (PC)+,R1		; pointer to tempo and order list
+SPC10:	.WORD Data10		; pointer to moved SPC file
+Read10:	MOV (R1),R0			; read pointer to pattern data
+		MOV (R0)+,R3		; read Sample 1 address
+		BEQ Next10			; end of pattern?
+		MOV (R0)+,Ch101		; read Note 1 frequency
+		MOV (R0)+,R4		; read Sample 1 address
+		MOV (R0)+,Ch102		; read Note 2 frequency
+		MOV (R0)+,R5		; read Drum sample address
+		MOV (R0)+,Ch103		; read Drum instruction
+		MOV R0,(R1)			; save pointer to order list		
+		BR Play10
+
+Next10:	TST (R1)+			; next order
+		BEQ Exit10			; end of order?
+		MOV R1,SPC10		; save new pointer
+		BR Read10
+
+Exit10:	JMP @#100000		; soft restart
+		HALT
+
+EndPlayer10:
+
+; ------------------
+
+		; 12. words
+BlockLoad11:				; code to replace EMT 36 loader
+		MOV PC,SP
+		CALL @#160004		; load file by block number
+		TST @#52			; no loading errors?
+		BEQ 2
+		MOV #Scr1*Lo+DOS*Hi,@#SysReg	; DOS page
+		JMP @#100000		; Exit11
+2:		NOP
+
+		; player code will be moved to low memory address
+
+Player11:
+		; loader code, 12. words, can be replaced with another subroutine
+		MOV #p1*Lo+DOS*Hi,@#SysReg	; page 1 and DOS for EMT 36
+		MOV PC,SP
+		EMT 36				; load INS file
+		TSTB @#EMT36+1		; no loading errors?
+		BEQ 2
+		CMPB @#EMT36+1,#4	; ROM overlap or Stop pressed
+		BNE Exit11
+2:
+
+		; end of loader
+
+		MOV #p1*Lo+p3*Hi,@#SysReg	; page 3 for Limiter table
+		MTPS #340			; disable interruptions
+		CLR R4
+		CLR (R4)+			; CLR @#0 to use as end marker
+		MOV #200,(R4)+		; zero volume
+		MOV #Low+Exit11-Player11,(R4)+	; @#4
+		MOV #340,(R4)
+
+		MOV (PC)+,R2		; convert unsigned samples to signed
+Addr11:	.WORD Data11
+		MOV (PC)+,R1
+Size11:	.WORD 100000-Data11
+1:			MOVB (R2),R0
+			SUB #200,R0
+			MOVB R0,(R2)+
+		SOB R1,1
+
+		MOV SPC11,R1		; pointer to SPC file
+		BR Next11
+
+		; player code will be moved to high memory address
+		; 11364 Hz mixing rate on BK 0011 4 MHz
+
+Play11:	MOV (PC)+,R0
+Temp11:	.WORD 3000			; less is faster
+Row11:	ADD (PC)+,(PC)+
+Ch111:	.WORD 1,1			; frequency for channel 1
+		ADC R3				; pointer to sample for channel 1
+		ADD (PC)+,(PC)+
+Ch112:	.WORD 1,1			; frequency for channel 2
+		ADC R4				; pointer to sample for channel 2
+Ch113:	MOVB (R5)+,R1		; instruction for channel 3
+		MOVB (R4),R2		; read sample data to buffer
+		ADD R2,R1			; mix sounds
+		MOVB (R3),R2		; read sample data to buffer
+		ADD R2,R1			; mix sounds
+Lim:	MOVB 137200(R1),@#COVOX	; send mixed sound through limiter
+		SOB R0,Row11
+
+		MOV (PC)+,R1		; pointer to tempo and order list
+SPC11:	.WORD 101400		; pointer to moved SPC file
+Read11:	MOV (R1),R0			; read pointer to pattern data
+		MOV (R0)+,R3		; read Sample 1 address
+		BEQ Next11			; end of pattern?
+		MOV (R0)+,Ch111		; read Note 1 frequency
+		MOV (R0)+,R4		; read Sample 1 address
+		MOV (R0)+,Ch112		; read Note 2 frequency
+		MOV (R0)+,R5		; read Drum sample address
+		MOV (R0)+,Ch113		; read Drum instruction
+		MOV R0,(R1)			; save pointer to order list		
+		BR Play11
+
+Next11:	TST (R1)+			; next order
+		BEQ Exit11			; end of order?
+		MOV R1,SPC11		; save new pointer
+		BR Read11
+
+Exit11:	MOV #Scr1*Lo+DOS*Hi,@#SysReg	; DOS memory page
+		JMP @#100000		; soft restart
+		HALT
+
+EndPlayer11:
+
+; -------------------------
+
+
+CopyPlayer:					; copy player to low memory
+		MOV #Low,R5			; where to copy
+1:		MOV (R4)+,(R5)+
+		BNE 1
+		RET
+
+; -------------------------
+
+
+BuildLimiterTable:	; for Player11: build limiter table after SPC file
+
+		MOV SPCnew,R2			; table after instruments
+		SUB #1400,R2			; Limiter table size
+		MOV #377,R3
+		MOV #140,R0
+1:			MOVB R3,1240(R2)	; R2: start address of the table
+			CLRB (R2)+
+		SOB R0,1
+		MOV #1,R1
+		MOV #1100,R0
+2:			MOVB R1,(R2)+
+			ADD #100000000/1100,#0
+			ADC R1
+		SOB R0,2
+		MOVB R3,-(R2)
+		MOVB R3,-(R2)
+		RET
+
+; -------------------------
+
+; input: R0 - INS address
+
+Check:	MOV R0,@#Address	; set address to load INS file
+		SUB #4000,R0		; offset to add
+
+		MOV INSend,R5		; highest possible address for instruments
+		MOV SPC,R4			; pointer to SPC file
+		SUB (R4),R5			; subtract row size (depends on tempo)
+		MOV (R4),Tempo
+
+		; apply offsets to sample address and check out of memory
+
+Offset:	TST (R4)+			; next order
+		MOV (R4),R2			; read pointer to pattern
+		BNE 1				; end of order list?
+			MOV R4,TitleText
+			RET
+1:		SUB #40000,R2		; reset pattern offset
+		MOV R2,CleanOffset	; store clean offset
+		ADD SPCnew,R2		; where pattern will be stored
+		CMP R2,SPCend
+		BLO 2
+			TST (SP)+		; do not return from call
+			MOV #NoMem,R1	; pointer to the text string
+			JMP Error
+2:		MOV R2,(R4)			; save fixed value
+
+		MOV R4,R3
+3:		CMP -(R3),R2		; was this pattern already converted?
+		BEQ Offset			; skip this pattern
+		CMP R3,SPC			; beginning of the order list?
+		BNE 3
+
+		MOV (PC)+,R2
+CleanOffset:	.WORD 200
+		ADD SPC,R2			; where pattern is really stored now
+
+ChRow:	MOV #2,R3			; do it for 2 channels
+1:		TST (R2)			; end of pattern?
+		BEQ Offset
+		ADD R0,(R2)			; apply offset
+		CMP R5,(R2)			; out of memory? (INSend-Tempo)
+		BHI 3
+2:			MOV #2,(R2)+	; kill the note
+			CLR (R2)+		; zero note frequency
+			BR 4
+3:		ADD #4,R2			; skip Note 1 frequency
+4:		SOB R3,1
+
+		ADD R0,(R2)			; apply offset to Drum sample
+		CMP R5,(R2)+		; out of memory? (INSend-Tempo)
+		BHI 6
+5:			MOV #111501,(R2)	; MOVB (R5),R1 instruction
+			MOV #2,-2(R2)	; kill the note
+6:		TST (R2)+			; skip Drum instruction
+		BR ChRow			; next row
+
+; -------------------------
+
+
+LoadSPC:
+		MOV #Hello1,R1		; pointer to the text string
+		CLR R2
+		EMT 20				; print
+		MOV #10000,R2
+0:		CLRB 67777(R2)		; clean screen
+		SOB R2,0
+		MOV #Hello2,R1		; pointer to the text string
+		EMT 20				; print
+		MOV #EMT36,R1		; EMT 36 data
+		MOV #3,(R1)+		; "load" command
+		MOV SPC,(R1)+		; loading address (#Free or #140000)
+		CLR (R1)+			; pointer to file name
+		MOV #12*400+20,R2	; Enter ASCII code and string size
+		EMT 10				; input text string
+		TST R2	
+		BEQ 2
+		INC R2
+		DEC R1				; to erase Enter symbol
+1:		MOVB #" ",(R1)+		; fill with spaces
+		SOB R2,1
+
+2:		MOV #EMT36,R1		; EMT 36 data
+3:		EMT 36				; load file
+		TSTB @#EMT36+1		; loading error?
+		BEQ 4
+		TST (SP)+			; do not return from call
+		HALT				; file not found, quit
+
+4:		MOVB #200,@#COVOX	; initial value
+		MOV #EMT36+6,R1		; pointer to file name
+		MOV #20,R0
+5:			CMPB (R1)+,#"."	; search for . symbol
+			BEQ 6
+		SOB R0,5
+		HALT				; no file extension found, exit
+
+6:		MOVB #"I",(R1)+		; change file extension to "INS"
+		MOVB #"N",(R1)+
+		MOVB #"S",(R1)+
+		RET
+
+; -------------------------
+
+
+Monitor11:	; check Tape loader
+		MOV #Tape11,R0		; pointer to the text string
+		CMP @#30,#147552	; BK 0011 Monitor's default, magnetic tape loader?
+		BNE 1
+			TST (SP)+		; do not return from CALL
+			EMT 20			; print text string
+			HALT			; quit
+1:		CMP @#30,#152112	; BK 0011M Monitor's default, magnetic tape loader?
+		BNE 2
+			TST (SP)+		; do not return from CALL
+			EMT 64			; print text string
+			HALT			; quit
+2:		RET
+
+; -------------------------
+
+
+Title:	MOV #Ready,R1		; hide cursor
+		CLR R2
+		EMT 20
+		MOV SPC,R1
+		ADD @#Size,R1		; the end of loaded SPC file
+		MOV #120,R0			; for Samara SST format
+
+1:		CMP -(R1),#"T1"
+		BEQ 2
+		SOB R0,1
+		BR 3 				; "SST1" label not found
+2:		CMP -2(R1),#"SS"
+		BNE 1
+		CMP (R1)+,(R1)+		; skip zero
+		BR 4
+3:		MOV TitleText,R1	; for classic SST format
+
+4:		TST (R1)+			; skip tempo or zero
+		MOV R1,R5
+		MOV #40,R2			; maximum string size
+		EMT 20				; print song title
+		ADD #40,R5			; pointer to file names
+		MOV #67,R4			; cursor position X
+5:		CLR R3
+		MOV #4,R0			; number of instruments
+6:			MOV R4,R1		; cursor position X
+			MOV R3,R2		; cursor position Y
+			EMT 24			; locate cursor
+			MOV R5,R1		; pointer to file name
+			MOV #10,R2		; size of text string
+			EMT 20			; print file name
+			ADD #10,R5
+			INC R3
+		SOB R0,6
+		MOV #55,R4			; new cursor position X
+		INC PC
+		BR 5				; repeat twice
+		RET
+
+; -------------------------
+
+
+GetINSinfo:
+		MOV FDDblk,R3		; pointer to HDD parameters block
+		CALL @120024		; MKDOS read catalog of files from disk
+		BCC 1				; catalog address in R3, if no errors
+			TST (SP)+		; do not return from call
+			MOV #NoCat,R1	; pointer to the text string
+			JMP @#Error
+1:		CALL @120026		; MKDOS search file in catalog
+		BCC 2
+			TST (SP)+		; do not return from call
+			MOV #NoFile,R1	; pointer to the text string
+			JMP @#Error
+2:		MOV 20(R3),R0		; file's start block on disk
+		ADD @#120134,R0		; logical disk offset, if any
+		MOV R0,FirstBlock
+		MOV 26(R3),R1		; file's size in bytes
+
+		ADD INSadr,R1		; last address of loaded INS file
+		CMP INSend,R1		; out of memory?
+		BHI 3
+			CLR R1			; cursor position X
+			MOV #2,R2		; cursor position Y
+			EMT 24			; locate cursor
+			CLR R2
+			MOV #LowMem,R1	; pointer to the text string
+			EMT 20
+			SOB R2,.
+			SOB R2,.
+			MOV INSend,R1 	; fix INS end address
+
+3:		SUB INSadr,R1		; reduce INS size
+		MOV R1,INSize
+		RET
+
+; -------------------------
+
+
+CheckMem10:
+		CLR R0				; how many extended 8 kb blocks we have
+		MOV @#4,-(SP)		; save system Halt vector
+
+		MOV #120000,R5
+		MOV #ROM1,@#4		; set new Halt vector
+		MOV (R5),(R5)		; check first 8 kb ROM or RAM
+		BIS #4,R0			; sign of first 8 kb RAM
+		BR ROM2
+
+ROM1:	CMP (SP)+,(SP)+		; add 4 to SP
+ROM2:	ADD #20000,R5
+		MOV #ROM3,@#4		; set new Halt vector
+		MOV (R5),(R5)		; check second 8 kb ROM or RAM
+		BIS #10,R0			; sign of second 8 kb RAM
+		BR ROM4
+
+ROM3:	CMP (SP)+,(SP)+		; add 4 to SP
+ROM4:	CMP @#30,#100112	; BK 0010 Monitor's default, magnetic tape loader?
+		BEQ 1				; if magnetic tape loader, use all extended memory
+		TST MKDOS			; wich DOS we have?
+		BPL 1				; if MKDOS, use all external memory
+			SUB #4,R0		; if not MKDOS, don't overwrite DOS in extended memory
+			CMP R0,#10		; is 140000-157700 RAM available?
+			BEQ 1
+			CLR R0 			; don't overwrite DOS in use extended memory
+1:		MOV (SP)+,@#4		; restore system Halt vector
+		MOV MemMap+2(R0),R1	; SPCend
+		MOV R1,SPCend
+		MOV R1,FDDb10
+		SUB @#Size,R1		; SPCnew
+		CMP R1,MemMap(R0)	; compare with minimal avalale address
+		BHIS 2
+			TST (SP)+		; do not return from call
+			CLR R1			; cursor position X
+			MOV #2,R2		; cursor position Y
+			EMT 24			; locate cursor
+			MOV #NoMem,R1	; pointer to the text string
+			JMP Error
+2:		MOV R1,SPCnew
+		MOV R1,SPC10
+		RET
+
+MemMap:	.WORD Data10,100000, 120000,137700, 140000,157700, 120000,157700
+
+; -------------------------
+
+
+Error:	MOV #Scr1*Lo+DOS*Hi,@#SysReg	; DOS page
+		PUSH R1
+		CLR R1				; cursor position X
+		MOV #2,R2			; cursor position Y
+		EMT 24				; locate cursor
+		POP R1
+		CLR R2
+		EMT 20				; print error message
+		HALT				; exit
+
+
+; -------------------------
+
+
+FDDblk:	.WORD 136712		; address of FDD/HHD parameters block
+MKDOS:	.WORD -1			; -1 = other DOS or version < 3.15
+SPC:	.WORD Free			; pointer to loaded SPC file
+SPCnew:	.WORD Data10		; pointer to moved SPC file
+SPCend:	.WORD 100000		; the highest available address for SPC data
+INSadr:	.WORD Data11		; address of INS data
+INSize:	.WORD 100000-Data11	; size of INS data
+INSend:	.WORD 100000		; the highest available address for INS data
+Tempo:	.WORD 2400
+FirstBlock:	.WORD 0			; starting block of INS file on the disk
+TitleText:	.WORD Free		; pointer to song name and instruments names
+
+Hello1:	.BYTE 14,214,236,0	; clear screen, compact screen, system string
+Hello2:	.ASCII " SPCplay 1.4"
+		.BYTE 12
+		.ASCIZ " FileName: "
+NoMem:	.ASCIZ " Not enough memory for pattern data!"
+LowMem:	.ASCIZ " Not enough memory for instruments"
+NoCat:	.ASCIZ " Can not read disk catalog!"
+NoFile:	.ASCIZ " .INS file not found!"
+Tape11:	.BYTE 12 .ASCIZ "MKDOS or ANDOS required"
+Ready:	.BYTE 232,12,40,0
+		.EVEN
+
+
+Free:	.ASCIZ "(c) Manwe 2023"
+		.EVEN
+
+	.END
+
+; end of file
+

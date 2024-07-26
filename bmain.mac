@@ -1,0 +1,456 @@
+	.title	MAIN
+	.mcall	.print .exit .herr .setto .csige .csisp .looku .cstat .readw .close
+	.list	MEB
+	.enabl	LC ; without AMA, contains relocatable code
+	
+	.asect
+	.=1000
+
+; MS-0511 (UKNC) adaptation of Manwe's .SPC covox player
+; Original: https://manwe.pdp-11.ru/?/music/soft
+
+Start:	; hello world!
+	.print	#MsgHello
+
+	; init mem and read files
+	call	GetAllMem			; get all memory (up to USR)
+	call	ReadSpcFile
+	call	ReadInsFile
+
+	; start PPU code
+	mov	#PpuStart, R4
+	mov	#PpuEnd-PpuStart/2, R5
+	call	PPRun
+
+	; wait for PPU is ready
+	tst	PpuComm
+	bne	.-4
+
+	; player
+	call	SpcCorrect
+	call	InsCorrect
+	call	SpcPlay
+
+	; ask PPU for exit
+	dec	PpuComm
+	tst	PpuComm
+	bne	.-4
+
+	; release PPU memory
+	call	PPRele
+
+	; exiting
+	mov	ErrCode, @#52			; set error to exit from .COM files if needed
+	clr	R0				; .hreset before .exit
+	.exit
+
+ErrCode:	.word	0
+MsgHello:	.ascii	"SPCPlay v1.4 MS-0511 (UKNC) version. Original by Manwe for BK-0010/11."<12><15>
+		.asciz	"Usage: RUN SPCP FILE (must have both FILE.SPC and FILE.INS on device)"
+
+; //////////////////////////////////////////////////////////////////////////////
+; // Player
+; //////////////////////////////////////////////////////////////////////////////
+
+; correct .SPC file data to new offsets
+SpcCorrect:
+	; correct  pointers in .SPC (they are as file loaded at 40000)
+	mov	SpcFileStart, R0
+	mov	R0, R1
+	sub	#40000, R1			; R1 = .SPC correction addition
+	mov	InsFileStart, R2
+	sub	#4000, R2			; R2 = .INS correction addition
+	; correct them
+	mov	(R0), Temp10			; set tempo
+	clr	(R0)				; and clear it in SPC to be sure that 1st pattern will always correct sample addrs
+10$:	tst	(R0)+				; advance pattern list addr
+	mov	(R0), R3			; R3 - old pattern addr
+	beq	99$				; end of song?	
+	add	R1, R3				; R3 - new pattern addr
+	mov	R3, (R0)			; store it
+	; must check did we corrected samples addrs already
+	; if it was already corrected - then this addr must be present within prev pattern addrs
+	mov	R0, R5
+12$:	cmp	R3, -(R5)
+	beq	10$				; already converted samples addrs for this pattern
+	cmp	R5, SpcFileStart
+	bhi	12$
+20$:	; correct sample pointers
+	tst	(R3)				; end of pattern?
+	beq	10$
+	add	R2, (R3)+			; correct sample #1 addr
+	tst	(R3)+				; skip note
+	add	R2, (R3)+			; correct sample #2 addr
+	tst	(R3)+				; skip note
+	add	R2, (R3)+			; correct drum addr
+	tst	(R3)+				; skip instruction
+	br	20$
+99$:	return
+
+
+; correct volumes in .INS file (divide by 3)
+InsCorrect:
+	mov	InsFileStart, R0		; start addr
+	mov	InsFileEnd, R3
+	sub	R0, R3				; end addr (with alignment by 512 bytes)
+10$:	clr	R4
+	clr	R5
+	bisb	(R0), R5
+	div	#3, R4
+	movb	R4, (R0)+
+	sob	R3, 10$
+	return
+
+
+; player (Manwe's code is here)
+SpcPlay:
+	mtps	#200				; no way you interrupts!
+	mov	SpcFileStart, R1		; R1 - addr of .SPC
+	br	Next10
+
+Play10:
+	mov	(PC)+, R0
+Temp10:	.word	3000				; less is faster
+Row10:	add	(PC)+, (PC)+
+Ch101:	.word	1, 1				; frequency for channel 1
+	adc	R3				; pointer to sample for channel 1
+	add	(PC)+, (PC)+
+Ch102:	.word	1, 1				; frequency for channel 2
+	adc	R4				; pointer to sample for channel 2
+Ch103:	movb	(R5)+, R1			; instruction for channel 3
+	movb	(R4), R2			; read sample data
+	add	R2, R1				; mix sounds
+	movb	(R3), R2			; read sample data
+	add	R2, R1				; mix sounds
+	movb	R1, PpuLpt			; send mixed sound to Covox
+	.rept	22				; UNKC is faster than BK-0010
+	nop					; so - slow it down
+	.endr
+	sob	R0, Row10
+
+; Sample address	word	| Channel 1 data
+; Note frequency	word	|
+; Sample address	word	| Channel 2 data
+; Note frequency	word	|
+; Drum address		word	| Channel 3 data
+; Drum instruction	word
+
+	mov	(PC)+, R1			; pointer to tempo and order list
+SPC10:	.word	0				; pointer to moved SPC file
+Read10:	mov	(R1), R0			; read pointer to pattern data
+	mov	(R0)+, R3			; read Sample 1 address
+	beq	Next10				; end of pattern?
+	mov	(R0)+, Ch101			; read Note 1 frequency
+	mov	(R0)+, R4			; read Sample 1 address
+	mov	(R0)+, Ch102			; read Note 2 frequency
+	mov	(R0)+, R5			; read Drum sample address
+	mov	(R0)+, Ch103			; read Drum instruction
+	mov	R0, (R1)			; save pointer to order list		
+	br	Play10
+
+Next10:	tst	PpuKeyRelease			; pressed anything on keyboard?
+	bne	Exit10
+	tst	(R1)+				; advance pointer in pattern list
+	tst	(R1)				; do we have a pattern
+	beq	Exit10				; nope - exiting
+	mov	R1, SPC10			; save new pointer
+	br	Read10
+
+Exit10:	mtps	#0
+	return
+
+
+; //////////////////////////////////////////////////////////////////////////////
+; // Memory and utils
+; //////////////////////////////////////////////////////////////////////////////
+
+RamTop:		.word	0			; top addr of available RAM
+
+MsgSettop:	.asciz	"? can't use all memory (.settop failed)"
+MsgNoMemory:	.asciz	"? can't allocate memory up to 100000"
+		.even 
+
+; code from Alex_K
+GetAllMem:
+	mov	@#54, R0			; addr of RMON
+	mov	266(R0), R0			; addr of USR? (in case of set USR SWAP)
+	tst	-(R0)				; -2 bytes
+	.setto
+	bcc	10$
+	.print	#MsgSettop
+	.exit
+10$:	mov	R0, RamTop
+	cmp	R0, #100000			; at least top must be 100000 (i want so :)
+	bhis	20$
+	.print	#MsgNoMemory
+	.exit
+20$:	; and clear memory to top from end of code
+	mov	#PpuEnd, R0
+	mov	RamTop, R3
+	sub	R0, R3
+	clrb	(R0)+
+	sob	R3, .-2
+	return 
+
+
+; remove dot '.' from string (replace with #0)
+; R0 - str addr (must end with zero byte)
+RemoveDot:
+	movb	(R0)+, R1
+	beq	99$
+	cmpb	R1, #'.
+	bne	RemoveDot
+	clrb	-(R0)
+99$:	return
+
+
+; //////////////////////////////////////////////////////////////////////////////
+; // File read
+; //////////////////////////////////////////////////////////////////////////////
+
+		.ascii	"> "
+fStrBuf:	.blkb	82.
+
+fDSPAC	= PpuEnd				; .csigen device handler buffer (usually it's start of free space after our program)					
+fDEXT_SPC:	.rad50	"SPC"			; default input extension
+		.word	0,0,0			; default output extensions
+fDEXT_INS:	.rad50	"INS"
+		.word	0,0,0
+fAREA:		.blkw	5			; parameters buffer for .readw macro
+fCSTAT:		.blkw	6			; channel status info buffer
+
+SpcFileStart:	.word	fdSPAC			; addr of readed .SPC file 
+InsFileStart:	.word	fdSPAC			; addr of readed .INS file
+InsFileEnd:	.word	fdSPAC
+
+MsgReadError:	.asciz	"? file read error"
+MsgFileIsBig:	.asciz	"? file is too big to fit in memory"
+MsgNoChannel:	.asciz	"? unable to open file channel #3"
+MsgNoInsFile:	.asciz	"? appropriate .INS file is missing"
+		.even
+
+; read first file with .csigen (e.g. RUN SPCP.SAV FILE.SPC)
+ReadSpcFile:
+	mov	SP, R5				; save SP before .csigen (will change it)
+	.csige	#fDSPAC, #fDEXT_SPC,, #fStrBuf	; load handler, open file channel from user input
+	mov	R5, SP				; restore SP	
+	mov	R0, SpcFileStart		; adjust .spc file starting addr if .csige loaded device handler
+	.print	#fStrBuf-2			; print csi string
+	; get file size and check for overflow
+	.cstat	#fAREA, #3, #fCSTAT		; get channel info
+	bcc	10$
+	.print	MsgNoChannel
+	br	99$
+10$:	mov	fCSTAT+4, R4			; file size in blocks
+	swab	R4				; file size in words
+	clrb	R4
+	mov	R4, R5				; R5 = file size in words
+	asl	R4				; R4 = file size in bytes
+	add	SpcFileStart, R4		; R4 = file end + 1
+	mov	R4, InsFileStart		; .INS file will be placed immediately after .SPC
+	cmp	R4, RamTop			; check for overflow
+	blo	20$
+	.print	#MsgFileIsBig
+	br	99$
+	; reading
+20$:	.readw	#fAREA, #3, SpcFileStart, R5, #0
+	bcc	30$
+	tstb	@#52				; EOF error ?
+	beq	30$
+	.print	#MsgReadError
+	br	99$
+30$:	.close	#3
+	return
+99$:	clr	R0				; perform .hreset before .exit
+	.exit
+
+; read second file (using .csispc and usual .lookup)
+ReadInsFile:
+	mov	#fStrBuf, R0			; try to remove dot from fStrBuf (remove extension)
+	call	RemoveDot
+	mov	SP, R5				; save SP before .csispc (will change it)
+	.csisp	#fStrBuf, #fDEXT_INS, #fStrBuf	; we are overlaying OUTSPC and CSTRNG here in one fStrBuf
+	mov	R5, SP				; restore SP	
+	.looku	#fAREA, #3, #fStrBuf+36		; open file from returned data by .csisp on channel #3
+	bcc	8$
+	.print	#MsgNoInsFile
+	br	99$
+8$:	; get file size and check for overflow
+	.cstat	#fAREA, #3, #fCSTAT		; get channel info
+	bcc	10$
+	.print	MsgNoChannel
+	br	99$		
+10$:	mov	fCSTAT+4, R4			; file size in blocks
+	swab	R4				; file size in words
+	clrb	R4
+	mov	R4, R5				; R5 = file size in words
+	asl	R4				; R4 = file size in bytes	
+	add	InsFileStart, R4		; R4 = file end + 1
+	mov	R4, InsFileEnd			; save end of file
+	cmp	R4, RamTop			; check for overflow
+	blo	20$
+	.print	#MsgFileIsBig
+	br	99$
+	; reading
+20$:	.readw	#fAREA, #3, InsFileStart, R5, #0
+	bcc	30$
+	tstb	@#52				; EOF error ?
+	beq	30$
+	.print	#MsgReadError
+	br	99$
+30$:	.close	#3
+	return
+99$:	clr	R0				; perform .hreset before .exit
+	.exit
+
+
+; //////////////////////////////////////////////////////////////////////////////
+; // CPU <-> PPU
+; //////////////////////////////////////////////////////////////////////////////
+
+MsgPpuNoMemory:	
+	.asciz	"? unable to allocate memory in PPU"
+	.even
+
+; PPU message
+;
+PPmsg:	.word	PPArr				; address of beginning of array
+        .word	177777				; end of transmission
+
+; PPU data exchange array
+;
+PPArr:	.byte	0				; return value (0 - OK)
+PPCmd:	.byte	0				; command
+	.word	32				; device type (32 - PPU mem)
+PPApp:	.word	0				; address for PPU
+PPAcp:	.word	0				; address for CPU
+PPLen:	.word	0				; length in words
+
+; send command to PPU with exch array
+PPSen:	mov	R0, -(SP)
+	mov	R1, -(SP)
+	mov	#PPMsg, R0			; array address
+	mov	#5, R1				; bytes to send+1 (sending from @#PP_MSG)
+	br	1$
+2$:	movb	(R0)+, @#176676
+1$:	tstb	@#176674			; test if we are ready to send
+	bpl	1$				; cycle if >= 0 (not set last bit in byte)
+	sob	R1, 2$
+	mov	(SP)+, R1
+	mov	(SP)+, R0
+	return
+
+; send and start PPU code
+; R4 - start addr in CPU
+; R5 - length / 2
+PPRun:	movb	#1, PPCmd			; 1 - allocate memory
+	mov	R5, PPLen
+	call	PPSen
+	tstb	PPArr				; test if allocate success
+	beq	1$				; 0 - OK
+	.print	#MsgPpuNoMemory
+	.exit					; fatal error - out of memory in PPU
+1$:	movb	#20, PPCmd			; 20 - write to PPU mem
+	mov	R5, PPLen
+	mov 	R4, PPAcp
+	call	PPSen
+	movb	#30, PPCmd			; 30 - run
+	call	PPSen
+	return
+
+; release PPU memory
+PPRele:	movb	#2, PPCmd			; 2 - release memory
+	call	PPSen
+	return
+
+
+; //////////////////////////////////////////////////////////////////////////////
+; // PPU code
+; //////////////////////////////////////////////////////////////////////////////
+
+PpuStart:
+	mtps	#200
+	clr	R0
+	call	@7132(R0)			; stop FD motor
+	; grab keyboard interrupt
+	mov	@#300, Ppu300Int
+	mov	PC, R0
+	add	#PpuKeyboard-., R0
+	mov	R0, @#300
+	; all LPT ports to output and adjust amplitude 377 to 177
+	mov	#177, @#177103
+	call	PpuLptTo177
+	; set regs
+	mov	#PpuLpt/2, R0
+	mov	#PpuComm/2, R1
+	mov	#177100, R2
+	mov	#177010, R4
+	mov	#177014, R5
+	; signal to CPU that we are working now
+	mov	R1, (R4)
+	clr	(R5)
+	mtps	#0
+	; write to LPT cycle
+10$:	mov	R0, (R4)			; set addr on CPU #PpuLpt
+	mov	(R5), (R2)			; out to LPT
+	mov	R1, (R4)			; set addr on CPU #PpuComm
+	tst	(R5)				; test it for exit
+	bpl	10$
+	; exit
+90$:	mtps	#200
+	mov	Ppu300Int, @#300		; restore kbd interrupt
+	mov	R1, (R4)			; R1=#PpuComm/2
+	clr	(R5)				; signal to CPU that we are finished
+	call	PpuLptTo377			; adjust amplitude from current PpuLpt to 377
+	mtps	#0
+	return
+
+
+; PPU keyboard interrupt (signal to CPU that we released anykey)
+PpuKeyboard:
+	mov	@#177010, -(SP)			; addr register must be saved in interrupts
+	mov	R0, -(SP)
+	mov	@#177702, R0			; key press or release
+	bit	#^B10000000, R0			; is it released?
+	beq	10$
+	mov	#PpuKeyRelease/2, @#177010
+	mov	R0, @#177014
+10$:	mov	(SP)+, R0
+	mov	(SP)+, @#177010
+	rti
+
+
+; slow adjust LPT amplitude to 0x80
+PpuLptTo177:
+	mov	#377, R0
+10$:	mov	R0, @#177100
+	mov	#1000, R3
+	sob	R3, .
+	dec	R0
+	cmp	R0, #176
+	bhi	10$
+	return
+
+
+; slow adjust LPT amplitude to zero
+PpuLptTo377:
+	mov	#PpuLpt/2, @#177010
+	mov	@#177014, R0
+10$:	mov	R0, @#177100
+	mov	#400, R3
+	sob	R3, .
+	inc	R0
+	cmp	R0, #400
+	blo	10$
+	return
+
+
+; data
+PpuComm:	.word	0
+PpuLpt:		.word	177			; default amplitude = 0 (inverted)
+Ppu300Int:	.word	0			; keyboard int addr
+PpuKeyRelease:	.word	0			; =1 -> key was released
+
+PPUEnd:
+
+	.end	Start
