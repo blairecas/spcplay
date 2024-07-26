@@ -458,6 +458,7 @@ PpuStart:
 	mov	R1, (R4)			; set addr on CPU #PpuComm
 	tst	(R5)				; test it for exit
 	bpl	30$
+	call	PpuLptTo377			; adjust amplitude from current PpuLpt to 377
 	br	90$
 
 40$:	; AY version
@@ -466,11 +467,11 @@ PpuStart:
 	mov	R1, (R4)
 	tst	(R5)
 	bpl	40$
+	; TODO: clear reg #14? reset AY?
 
 90$:	; exit
 	mtps	#200
 	mov	Ppu300Int, @#300		; restore kbd interrupt
-	call	PpuLptTo377			; adjust amplitude from current PpuLpt to 377
 	mov	#PpuComm/2, (R4)		; 
 	clr	(R5)				; signal to CPU that we are finished
 	mtps	#0
