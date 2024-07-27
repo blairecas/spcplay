@@ -36,7 +36,7 @@ Start:	; hello world!
 
 10$:	; player
 	call	SpcCorrect
-;	call	InsCorrect
+;	call	InsCorrect			; not needed, using 10-bit mixer
 	call	SpcPlay
 
 90$:	; ask PPU for exit
@@ -109,17 +109,17 @@ SpcCorrect:
 
 
 ; correct volumes in .INS file (divide by 3)
-InsCorrect:
-	mov	InsFileStart, R0		; start addr
-	mov	InsFileEnd, R3			; end addr +1 (with alignment by 512 bytes)
-	sub	R0, R3				
-10$:	clr	R4
-	clr	R5
-	bisb	(R0), R5
-	div	#3, R4
-	movb	R4, (R0)+
-	sob	R3, 10$
-	return
+;InsCorrect:
+;	mov	InsFileStart, R0		; start addr
+;	mov	InsFileEnd, R3			; end addr +1 (with alignment by 512 bytes)
+;	sub	R0, R3				
+;10$:	clr	R4
+;	clr	R5
+;	bisb	(R0), R5
+;	div	#3, R4
+;	movb	R4, (R0)+
+;	sob	R3, 10$
+;	return
 
 
 ; player (Manwe's code is here)
@@ -154,7 +154,8 @@ Ch103:	movb	(R5)+, R1			; instruction for channel 3 (modified if no drum on chan
 	mov	R0, PpuLpt
 PlExit:	clc					; set this to sec for exit (will be done in PPU after key release)
 	bcs	Exit10
-	nop					; slow mixer a bit
+	nop					; slow mixer a bit (still faster than BK version)
+	nop
 	sob	SP, Row10
 
 ; Sample address	word	| Channel 1 data
