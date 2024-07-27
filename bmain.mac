@@ -155,7 +155,6 @@ Ch103:	movb	(R5)+, R1			; instruction for channel 3 (modified if no drum on chan
 PlExit:	clc					; set this to sec for exit (will be done in PPU after key release)
 	bcs	Exit10
 	nop					; slow mixer a bit (still faster than BK version)
-	nop
 	sob	SP, Row10
 
 ; Sample address	word	| Channel 1 data
