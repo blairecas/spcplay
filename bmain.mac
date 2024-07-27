@@ -36,7 +36,7 @@ Start:	; hello world!
 
 10$:	; player
 	call	SpcCorrect
-	call	InsCorrect
+;	call	InsCorrect
 	call	SpcPlay
 
 90$:	; ask PPU for exit
@@ -126,31 +126,36 @@ InsCorrect:
 SpcPlay:
 	mtps	#200				; no way you interrupts!
 	mov	SpcFileStart, R1		; R1 - addr of .SPC
+SaveSP:	mov	SP, #000000			; save our stack register
 	br	Next10
 
-Play10:
-	mov	(PC)+, R0
-Temp10:	.word	3000				; less is faster
-Row10:	add	(PC)+, (PC)+
-Ch101:	.word	1, 1				; frequency for channel 1
+Play10:	mov	(PC)+, SP			; SP is used as cycle counter
+Temp10:	.word	003000				; less is faster
+
+Row10:	; advance channel 1/2 addrs
+	add	(PC)+, (PC)+
+Ch101:	.word	000001, 000001			; frequency for channel 1
 	adc	R3				; pointer to sample for channel 1
 	add	(PC)+, (PC)+
-Ch102:	.word	1, 1				; frequency for channel 2
+Ch102:	.word	000001, 000001			; frequency for channel 2
 	adc	R4				; pointer to sample for channel 2
-Ch103:	movb	(R5)+, R1			; instruction for channel 3
-	movb	(R4), R2			; read sample data
+	; mixing them
+Ch103:	movb	(R5)+, R1			; instruction for channel 3 (modified if no drum on channel)
+	bic	#^B1111111100000000, R1
+	clr	R2
+	bisb	(R4), R2			; read sample data
 	add	R2, R1				; mix sounds
-	movb	(R3), R2			; read sample data
+	clr	R2
+	bisb	(R3), R2			; read sample data
 	add	R2, R1				; mix sounds
-	movb	R1, PpuLpt			; send mixed sound to Covox
-
-	tst	PpuKeyRelease			; pressed anything on keyboard?
-	bne	Exit10
-	.rept	16				; UNKC is faster than BK-0010
-	nop					; so - slow it down
-	.endr
-
-	sob	R0, Row10
+	; divide amplitude in R1 by 3 then
+	clr	R0
+	div	#3, R0
+	mov	R0, PpuLpt
+PlExit:	clc					; set this to sec for exit (will be done in PPU after key release)
+	bcs	Exit10
+	nop					; slow mixer a bit
+	sob	SP, Row10
 
 ; Sample address	word	| Channel 1 data
 ; Note frequency	word	|
@@ -160,7 +165,7 @@ Ch103:	movb	(R5)+, R1			; instruction for channel 3
 ; Drum instruction	word
 
 	mov	(PC)+, R1			; pointer to tempo and order list
-SPC10:	.word	0				; pointer to moved SPC file
+Spc10:	.word	0				; pointer to moved SPC file
 Read10:	mov	(R1), R0			; read pointer to pattern data
 	mov	(R0)+, R3			; read Sample 1 address
 	beq	Next10				; end of pattern?
@@ -175,10 +180,11 @@ Read10:	mov	(R1), R0			; read pointer to pattern data
 Next10:	tst	(R1)+				; advance pointer in pattern list
 	tst	(R1)				; do we have a pattern
 	beq	Exit10				; nope - exiting
-	mov	R1, SPC10			; save new pointer
+	mov	R1, Spc10			; save new pointer
 	br	Read10
 
-Exit10:	mtps	#0
+Exit10:	mov	SaveSP+2, SP			; restore saved SP
+	mtps	#0
 	return
 
 
@@ -241,6 +247,16 @@ CheckAyOption:
 99$:	return
 
 
+; prints song title from loaded .SPC
+PrintSongTitle:
+	mov	SpcFileStart, R0
+	tst	(R0)+				; skip tempo and pattern addrs
+	bne	.-2
+	clrb	31.(R0)				; be sure to end with zero
+	.print
+	return
+
+
 ; //////////////////////////////////////////////////////////////////////////////
 ; // File read
 ; //////////////////////////////////////////////////////////////////////////////
@@ -298,9 +314,11 @@ ReadSpcFile:
 	.print	#MsgReadError
 	br	99$
 30$:	.close	#3
+	call	PrintSongTitle			; print title if any
 	return
 99$:	clr	R0				; perform .hreset before .exit
 	.exit
+
 
 ; read second file (using .csispc and usual .lookup)
 ReadInsFile:
@@ -493,6 +511,8 @@ PpuKeyboard:
 	beq	10$
 	mov	#PpuKeyRelease/2, @#177010
 	mov	R0, @#177014
+	mov	#PlExit/2, @#177010		; modify CPU mixer to exit (if it's playing)
+	mov	#000261, @#177014		; SEC opcode
 10$:	mov	(SP)+, R0
 	mov	(SP)+, @#177010
 	rti
