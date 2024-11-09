@@ -63,7 +63,8 @@ ErrMsg:		.word	0
 
 MsgHello:	.ascii	"SPCPlay v1.4 MS-0511 (UKNC) version. Original by Manwe for BK-0010/11."<12><15>
 		.ascii	"Usage: RU SPCP FILE (must have both FILE.SPC and FILE.INS on device)"<12><15>
-		.asciz	"       RU SPCP FILE/Y - change covox output to AY #14 instead of LPT"
+		.ascii	"       RU SPCP FILE/Y - change covox output to AY #14 instead of LPT"<12><15>
+		.asciz	"       RU SPCP FILE/P:XXXXXX - change covox output to PPU reg XXXXXX"
 MsgNoAY:	.asciz	"? no AY device detected on PPU 177360"
 		.even
 
@@ -239,11 +240,15 @@ CheckAyOption:
 	tst	(R0)+				; advance because of previous call to this procedure
 	tst	(R0)+				; any options at all?
 	beq	99$				; nope
-	mov	(R0), R0			; get first option character/file number
-	bic	#^B1111111110000000, R0		; clear not needed bits 
-	cmp	R0, #131			; 131 = char Y
-	bne	99$
+	mov	(R0)+, R1			; get first option character/file number
+	bic	#^B1111111110000000, R1		; clear not needed bits 
+	cmp	R1, #'Y				; (131) char Y
+	bne	10$
 	inc	UseAY
+	return
+10$:	cmp	R1, #'P				; (115) char P
+	bne	99$
+	mov	(R0), PpuPortA
 99$:	return
 
 
@@ -456,7 +461,7 @@ PpuStart:
 	bne	10$
 	mov	#177, @#177103
 	call	PpuLptTo177
-	mov	#177100, R2			; LPT port A
+	mov	PpuPortA, R2			; LPT port A
 
 10$:	; (maybe) init AY
 	tst	HaveAY
@@ -551,7 +556,8 @@ CheckAY:
 ; slow adjust LPT amplitude to 0x80
 PpuLptTo177:
 	mov	#377, R0
-10$:	mov	R0, @#177100
+	mov	PpuPortA, R1
+10$:	mov	R0, (R1)
 	mov	#1000, R3
 	sob	R3, .
 	dec	R0
@@ -564,7 +570,8 @@ PpuLptTo177:
 PpuLptTo377:
 	mov	#PpuLpt/2, @#177010
 	mov	@#177014, R0
-10$:	mov	R0, @#177100
+	mov	PpuPortA, R1
+10$:	mov	R0, (R1)
 	mov	#400, R3
 	sob	R3, .
 	inc	R0
@@ -574,6 +581,7 @@ PpuLptTo377:
 
 
 ; data
+PpuPortA:	.word	177100			; default port is LPT A
 HaveAY:		.word	0			; do we have AY device?
 UseAY:		.word	0			; can we use covox in AY reg #14?
 PpuComm:	.word	1
