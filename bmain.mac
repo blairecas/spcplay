@@ -61,7 +61,7 @@ Start:	; hello world!
 ErrCode:	.word	0
 ErrMsg:		.word	0
 
-MsgHello:	.ascii	"SPCPlay v1.4 MS-0511 (UKNC) version. Original by Manwe for BK-0010/11."<12><15>
+MsgHello:	.ascii	"SPCPlay v1.4 MS-0511 (UKNC) version. Original by Manwe for BK-0010/11"<12><15>
 		.ascii	"Usage: RU SPCP FILE (must have both FILE.SPC and FILE.INS on device)"<12><15>
 		.ascii	"       RU SPCP FILE/Y - change covox output to AY #14 instead of LPT"<12><15>
 		.asciz	"       RU SPCP FILE/P:177372 - change covox output to PPU reg 177372"
