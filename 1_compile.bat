@@ -18,7 +18,7 @@ if %ERRORLEVEL% NEQ 0 ( exit /b )
 ..\scripts\rt11dsk.exe a ..\..\03_dsk\hdd.dsk .\release\spcp.sav >NUL
 
 del _bmain.mac
-del _bmain.lst
+rem del _bmain.lst
 del printer.log
 
 echo.
