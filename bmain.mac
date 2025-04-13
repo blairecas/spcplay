@@ -470,6 +470,7 @@ PpuStart:
 	mov	R1, (R4)
 	tst	(R5)
 	bpl	50$
+	mov	#100000, @#177716
 
 90$:	; exit
 	mtps	#200
